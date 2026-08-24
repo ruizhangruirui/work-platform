@@ -15,6 +15,13 @@
       "when": 1787575822178,
       "tag": "0001_broken_sunspot",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1787577623299,
+      "tag": "0002_audit_case_id",
+      "breakpoints": true
     }
   ]
 }

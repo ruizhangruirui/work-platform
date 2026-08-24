@@ -96,3 +96,30 @@ actions tied to the current ChatGPT user. Leave public content anonymous.
 
 - [vinext Documentation](https://github.com/cloudflare/vinext)
 - [Drizzle D1 Guide](https://orm.drizzle.team/docs/get-started/d1-new)
+
+## Environment variables
+
+| Variable | Purpose |
+| --- | --- |
+| `DEV_AUTH_ENABLED` | Set to `"true"` (e.g. in `.dev.vars`) to enable the local `x-dev-user` identity fallback. Off by default; never enable in a deployed environment. |
+| `DEV_DEFAULT_USER` | Default dev identity email used when `DEV_AUTH_ENABLED=true` and no `x-dev-user` header is sent. |
+| `AUTH_PROXY_SECRET` | Optional. When set, every request must carry `x-auth-proxy-token` with this value. Configure this if the worker is reachable directly (not only through the dispatch layer) so the identity header cannot be forged. |
+
+## Database migrations
+
+D1 migrations live in `drizzle/`. The easiest way to apply them to the remote
+database is the one-command helper:
+
+```sh
+bash scripts/apply-d1-migrations.sh            # defaults to database site-creator-d1
+bash scripts/apply-d1-migrations.sh <DB_NAME>  # or pass a database name
+```
+
+The script prints the exact steps and required inputs up front, checks your
+environment, guides you through Cloudflare login (browser, or
+`CLOUDFLARE_API_TOKEN` for CI), applies pending migrations with
+`wrangler d1 migrations apply --remote`, and verifies the
+`audit_logs.case_id` column and `audit_case_idx` index afterwards.
+
+Manual alternative: `wrangler d1 migrations apply <DB_NAME>` (remote) or
+`--local` for the dev database.

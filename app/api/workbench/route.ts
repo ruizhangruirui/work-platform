@@ -1,53 +1,378 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { env } from "cloudflare:workers";
 import { NextResponse } from "next/server";
-import { getCaseAccessLevel, canAssignTask, canCompleteTask, canShareCase, type AppUser, type CaseResource } from "../../../features/authorization/policy";
+import {
+  getCaseAccessLevel,
+  canAssignTask,
+  canCompleteTask,
+  canShareCase,
+  type AppUser,
+  type CaseResource,
+} from "../../../features/authorization/policy";
+import { caseVisibilityWhere } from "../../../features/authorization/visibility";
+import {
+  isShareAccessLevel,
+  isUniqueConstraintError,
+  parseSaveUserInput,
+} from "../../../features/authorization/validation";
 
 export const dynamic = "force-dynamic";
-type Row=Record<string,any>;
-const json=(body:unknown,status=200)=>NextResponse.json(body,{status});
-const now=()=>new Date().toISOString();
-const id=(prefix:string)=>`${prefix}_${crypto.randomUUID()}`;
-async function rows(sql:string,...values:unknown[]):Promise<Row[]>{const result=await (env as any).DB.prepare(sql).bind(...values).all();return result.results||[]}
-async function one(sql:string,...values:unknown[]):Promise<Row|null>{return (await rows(sql,...values))[0]||null}
-function requestEmail(request:Request){const email=request.headers.get("oai-authenticated-user-email");if(email)return email.toLowerCase();const host=new URL(request.url).hostname;if(host==="localhost"||host==="127.0.0.1")return (request.headers.get("x-dev-user")||"zhangruisomebody@outlook.com").toLowerCase();return null}
-async function currentUser(request:Request){const email=requestEmail(request);if(!email)return null;const user=await one(`SELECT u.*,r.name role FROM users u JOIN roles r ON r.id=u.role_id WHERE lower(u.email)=? AND u.status='Active'`,email);if(!user)return null;user.scopes=await rows(`SELECT scope_type scopeType,scope_id scopeId FROM user_scopes WHERE user_id=?`,user.id);return user as AppUser&Row}
-async function caseResource(caseId:string,userId:string):Promise<(CaseResource&Row)|null>{return await one(`SELECT c.*,p.lab_id labId,p.team_id teamId,cm.access_level memberAccess FROM cases c JOIN persons p ON p.id=c.person_id LEFT JOIN case_members cm ON cm.case_id=c.id AND cm.user_id=? AND cm.revoked_at IS NULL WHERE c.id=?`,userId,caseId) as any}
-async function audit(actorId:string,entityType:string,entityId:string,action:string,field:string|null,previousValue:string|null,newValue:string|null,metadata:unknown=null){return (env as any).DB.prepare(`INSERT INTO audit_logs(id,actor_id,entity_type,entity_id,action,field,previous_value,new_value,metadata,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)`).bind(id("audit"),actorId,entityType,entityId,action,field,previousValue,newValue,metadata?JSON.stringify(metadata):null,now())}
 
-export async function GET(request:Request){
-  const user=await currentUser(request);if(!user)return json({error:"account_not_added",message:"Your account has not been added to Team Workbench."},403);
-  const rawCases=await rows(`SELECT c.id,c.owner_id ownerId,c.case_type caseType,c.employment_type employmentType,c.start_date startDate,c.end_date endDate,c.status,c.priority,c.role,c.location,c.notes,c.updated_at updatedAt,p.full_name name,p.lab_id labId,p.team_id teamId,t.name team,u.name owner,cm.access_level memberAccess FROM cases c JOIN persons p ON p.id=c.person_id LEFT JOIN teams t ON t.id=p.team_id JOIN users u ON u.id=c.owner_id LEFT JOIN case_members cm ON cm.case_id=c.id AND cm.user_id=? AND cm.revoked_at IS NULL WHERE c.archived_at IS NULL ORDER BY c.updated_at DESC`,user.id);
-  const visible:Row[]=rawCases.map(c=>({...c,accessLevel:getCaseAccessLevel(user,{id:c.id,ownerId:c.ownerId,labId:c.labId,teamId:c.teamId,memberAccess:c.memberAccess})})).filter(c=>c.accessLevel!=="None");
-  const visibleIds=new Set(visible.map(c=>c.id));
-  const taskRows=(await rows(`SELECT x.*,p.full_name person,c.case_type caseType,u.name ownerName FROM tasks x JOIN cases c ON c.id=x.case_id JOIN persons p ON p.id=c.person_id JOIN users u ON u.id=x.owner_id WHERE x.owner_id=? ORDER BY x.due_date`,user.id)).filter(t=>visibleIds.has(t.case_id));
-  const caseId=new URL(request.url).searchParams.get("caseId")||visible[0]?.id||null;
-  const selected=visible.find(c=>c.id===caseId);
-  const checklist=selected?await rows(`SELECT i.*,u.name ownerName,cu.name completedByName FROM case_checklist_items i LEFT JOIN users u ON u.id=i.owner_id LEFT JOIN users cu ON cu.id=i.completed_by WHERE i.case_id=? ORDER BY i.section,i.sort_order`,selected.id):[];
-  const history=selected?await rows(`SELECT a.*,u.name actorName FROM audit_logs a JOIN users u ON u.id=a.actor_id WHERE (a.entity_type='case' AND a.entity_id=?) OR (a.metadata LIKE ?) ORDER BY a.created_at DESC LIMIT 50`,selected.id,`%${selected.id}%`):[];
-  const members=selected?await rows(`SELECT cm.id,cm.user_id userId,u.name,cm.access_level accessLevel FROM case_members cm JOIN users u ON u.id=cm.user_id WHERE cm.case_id=? AND cm.revoked_at IS NULL`,selected.id):[];
-  const users=await rows(`SELECT u.id,u.name,u.email,u.title,u.status,r.name role FROM users u JOIN roles r ON r.id=u.role_id ORDER BY u.name`);
-  for(const item of users)item.scopes=(await rows(`SELECT scope_type FROM user_scopes WHERE user_id=?`,item.id)).map(s=>s.scope_type);
-  const formatCase=(c:Row)=>({id:c.id,name:c.name,initials:c.name.split(" ").map((x:string)=>x[0]).join("").slice(0,2),caseType:c.caseType,type:c.employmentType||"Employee",team:c.team||"—",teamId:c.teamId,labId:c.labId,date:c.startDate||c.endDate||"—",owner:c.owner,ownerId:c.ownerId,status:c.status,accessLevel:c.accessLevel,role:c.role||"—",location:c.location||"—",notes:c.notes});
-  return json({currentUser:{id:user.id,name:user.name,email:user.email,title:user.title,role:user.role,status:user.status,scopes:(user.scopes||[]).map((s:Row)=>s.scopeType)},tasks:taskRows.map(t=>({id:t.id,title:t.title,person:t.person,caseId:t.case_id,caseType:t.caseType,due:t.due_date||"—",priority:t.priority,status:t.status,email:t.task_type==="Email",ownerId:t.owner_id,ownerName:t.ownerName})),cases:visible.map(formatCase),sharedCases:visible.filter(c=>c.memberAccess).map(formatCase),checklist:checklist.map(i=>({id:i.id,caseId:i.case_id,title:i.title,section:i.section,status:i.status,ownerId:i.owner_id,ownerName:i.ownerName||"Unassigned",dueDate:i.due_date,completedDate:i.completed_date,completedByName:i.completedByName,taskId:i.task_id})),history:history.map(a=>({id:a.id,createdAt:a.created_at,actorName:a.actorName,action:a.action,field:a.field,previousValue:a.previous_value,newValue:a.new_value})),members,users,permissions:{Admin:["All cases","Manage users","Share","Assign","Edit"],Operator:["Owned/shared cases","Complete tasks","Assign permitted work"],Manager:["Scoped cases","Assigned tasks"],Viewer:["Read permitted fields","Assigned task completion"]}});
+type Row = Record<string, any>;
+
+const json = (body: unknown, status = 200) => NextResponse.json(body, { status });
+const now = () => new Date().toISOString();
+const id = (prefix: string) => `${prefix}_${crypto.randomUUID()}`;
+
+async function rows(sql: string, ...values: unknown[]): Promise<Row[]> {
+  const result = await (env as any).DB.prepare(sql).bind(...values).all();
+  return result.results || [];
+}
+async function one(sql: string, ...values: unknown[]): Promise<Row | null> {
+  return (await rows(sql, ...values))[0] || null;
 }
 
-export async function POST(request:Request){
-  const user=await currentUser(request);if(!user)return json({error:"access_denied"},403);const body=await request.json() as Row;const action=body.action;
-  if(action==="toggleWork"){
-    const task=body.taskId?await one(`SELECT * FROM tasks WHERE id=?`,body.taskId):null;const item=body.checklistId?await one(`SELECT * FROM case_checklist_items WHERE id=?`,body.checklistId):task?.checklist_item_id?await one(`SELECT * FROM case_checklist_items WHERE id=?`,task.checklist_item_id):null;const caseId=task?.case_id||item?.case_id;if(!caseId)return json({error:"not_found"},404);const resource=await caseResource(caseId,user.id);if(!resource)return json({error:"not_found"},404);const access=getCaseAccessLevel(user,resource);const ownerId=task?.owner_id||item?.owner_id;if(!canCompleteTask(user,ownerId,access))return json({error:"access_denied"},403);const complete=body.complete!==false;const timestamp=now();const statements=[];if(item)statements.push((env as any).DB.prepare(`UPDATE case_checklist_items SET status=?,completed_date=?,completed_by=?,updated_at=? WHERE id=?`).bind(complete?"Completed":"Open",complete?timestamp:null,complete?user.id:null,timestamp,item.id));if(task)statements.push((env as any).DB.prepare(`UPDATE tasks SET status=?,completed_at=?,updated_at=? WHERE id=?`).bind(complete?"Completed":"Open",complete?timestamp:null,timestamp,task.id));else if(item?.task_id)statements.push((env as any).DB.prepare(`UPDATE tasks SET status=?,completed_at=?,updated_at=? WHERE id=?`).bind(complete?"Completed":"Open",complete?timestamp:null,timestamp,item.task_id));statements.push(await audit(user.id,"case_checklist_item",item?.id||task?.id||caseId,complete?"checklist completed":"checklist reopened","status",complete?"Open":"Completed",complete?"Completed":"Open",{caseId}));await (env as any).DB.batch(statements);return json({ok:true});
+/**
+ * Identity resolution.
+ *
+ * Production: the hosting dispatch layer authenticates the user and injects
+ * `oai-authenticated-user-email`. This is only safe while the worker is not
+ * reachable directly; if you deploy the worker behind your own proxy, set
+ * AUTH_PROXY_SECRET and have the proxy send it as `x-auth-proxy-token`.
+ *
+ * Local development: the x-dev-user fallback must be explicitly enabled with
+ * DEV_AUTH_ENABLED=true (e.g. in .dev.vars) — it is never inferred from the
+ * hostname. DEV_DEFAULT_USER sets the default identity when no header is sent.
+ */
+function requestEmail(request: Request): string | null {
+  const proxySecret = (env as any).AUTH_PROXY_SECRET;
+  if (proxySecret && request.headers.get("x-auth-proxy-token") !== proxySecret) return null;
+
+  const email = request.headers.get("oai-authenticated-user-email");
+  if (email) return email.toLowerCase();
+
+  if ((env as any).DEV_AUTH_ENABLED === "true") {
+    const devUser = request.headers.get("x-dev-user") || (env as any).DEV_DEFAULT_USER;
+    if (devUser) return String(devUser).toLowerCase();
   }
-  if(action==="assignTask"){
-    const task=await one(`SELECT * FROM tasks WHERE id=?`,body.taskId);if(!task)return json({error:"not_found"},404);const resource=await caseResource(task.case_id,user.id);if(!resource||!canAssignTask(user,resource))return json({error:"access_denied"},403);const assignee=await one(`SELECT id,name FROM users WHERE id=? AND status='Active'`,body.ownerId);if(!assignee)return json({error:"invalid_assignee"},400);const old=await one(`SELECT name FROM users WHERE id=?`,task.owner_id);const timestamp=now();const statements=[(env as any).DB.prepare(`UPDATE tasks SET owner_id=?,updated_at=? WHERE id=?`).bind(assignee.id,timestamp,task.id)];if(task.checklist_item_id)statements.push((env as any).DB.prepare(`UPDATE case_checklist_items SET owner_id=?,updated_at=? WHERE id=?`).bind(assignee.id,timestamp,task.checklist_item_id));statements.push(await audit(user.id,"task",task.id,"task owner changed","owner",old?.name,assignee.name,{caseId:task.case_id}));await (env as any).DB.batch(statements);return json({ok:true});
+  return null;
+}
+
+async function currentUser(request: Request) {
+  const email = requestEmail(request);
+  if (!email) return null;
+  // users.email is stored lowercased (saveUser normalizes on write), so a
+  // direct equality match can use the unique index on users.email.
+  const user = await one(
+    `SELECT u.*,r.name role FROM users u JOIN roles r ON r.id=u.role_id WHERE u.email=? AND u.status='Active'`,
+    email
+  );
+  if (!user) return null;
+  user.scopes = await rows(`SELECT scope_type scopeType,scope_id scopeId FROM user_scopes WHERE user_id=?`, user.id);
+  return user as AppUser & Row;
+}
+
+async function caseResource(caseId: string, userId: string): Promise<(CaseResource & Row) | null> {
+  return (await one(
+    `SELECT c.*,p.lab_id labId,p.team_id teamId,cm.access_level memberAccess FROM cases c JOIN persons p ON p.id=c.person_id LEFT JOIN case_members cm ON cm.case_id=c.id AND cm.user_id=? AND cm.revoked_at IS NULL WHERE c.id=?`,
+    userId,
+    caseId
+  )) as any;
+}
+
+/**
+ * Returns a prepared statement — always execute it via DB.batch()/run().
+ * case_id is stored in its own indexed column so case history queries use
+ * audit_case_idx instead of scanning metadata with LIKE.
+ */
+function audit(
+  actorId: string,
+  entityType: string,
+  entityId: string,
+  action: string,
+  field: string | null,
+  previousValue: string | null,
+  newValue: string | null,
+  caseId: string | null = null,
+  metadata: unknown = null
+) {
+  return (env as any).DB.prepare(
+    `INSERT INTO audit_logs(id,actor_id,entity_type,entity_id,action,field,previous_value,new_value,case_id,metadata,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`
+  ).bind(id("audit"), actorId, entityType, entityId, action, field, previousValue, newValue, caseId, metadata ? JSON.stringify(metadata) : null, now());
+}
+
+export async function GET(request: Request) {
+  const user = await currentUser(request);
+  if (!user) return json({ error: "account_not_added", message: "Your account has not been added to Team Workbench." }, 403);
+
+  // Visibility is pushed down to SQL (owner / membership / org scopes) so the
+  // database never returns rows the user cannot see; the JS filter stays as
+  // defense in depth and to compute each case's accessLevel.
+  const visibility = caseVisibilityWhere(user);
+  const rawCases = await rows(
+    `SELECT c.id,c.owner_id ownerId,c.case_type caseType,c.employment_type employmentType,c.start_date startDate,c.end_date endDate,c.status,c.priority,c.role,c.location,c.notes,c.updated_at updatedAt,p.full_name name,p.lab_id labId,p.team_id teamId,t.name team,u.name owner,cm.access_level memberAccess FROM cases c JOIN persons p ON p.id=c.person_id LEFT JOIN teams t ON t.id=p.team_id JOIN users u ON u.id=c.owner_id LEFT JOIN case_members cm ON cm.case_id=c.id AND cm.user_id=? AND cm.revoked_at IS NULL WHERE c.archived_at IS NULL ${visibility.clause} ORDER BY c.updated_at DESC`,
+    user.id,
+    ...visibility.values
+  );
+  const visible: Row[] = rawCases
+    .map((c) => ({ ...c, accessLevel: getCaseAccessLevel(user, { id: c.id, ownerId: c.ownerId, labId: c.labId, teamId: c.teamId, memberAccess: c.memberAccess }) }))
+    .filter((c) => c.accessLevel !== "None");
+  const visibleIds = visible.map((c) => c.id);
+
+  // Only open/waiting tasks plus tasks completed today (the dashboard counts
+  // "Completed Today"), restricted to cases the user can actually see.
+  const taskRows = visibleIds.length
+    ? await rows(
+        `SELECT x.*,p.full_name person,c.case_type caseType,u.name ownerName FROM tasks x JOIN cases c ON c.id=x.case_id JOIN persons p ON p.id=c.person_id JOIN users u ON u.id=x.owner_id WHERE x.owner_id=? AND x.case_id IN (${visibleIds.map(() => "?").join(",")}) AND (x.status != 'Completed' OR date(x.completed_at)=date('now')) ORDER BY x.due_date`,
+        user.id,
+        ...visibleIds
+      )
+    : [];
+
+  const caseId = new URL(request.url).searchParams.get("caseId") || visible[0]?.id || null;
+  const selected = visible.find((c) => c.id === caseId);
+  const checklist = selected
+    ? await rows(
+        `SELECT i.*,u.name ownerName,cu.name completedByName FROM case_checklist_items i LEFT JOIN users u ON u.id=i.owner_id LEFT JOIN users cu ON cu.id=i.completed_by WHERE i.case_id=? ORDER BY i.section,i.sort_order`,
+        selected.id
+      )
+    : [];
+  const history = selected
+    ? await rows(
+        `SELECT a.*,u.name actorName FROM audit_logs a JOIN users u ON u.id=a.actor_id WHERE a.case_id=? ORDER BY a.created_at DESC LIMIT 50`,
+        selected.id
+      )
+    : [];
+  const members = selected
+    ? await rows(
+        `SELECT cm.id,cm.user_id userId,u.name,cm.access_level accessLevel FROM case_members cm JOIN users u ON u.id=cm.user_id WHERE cm.case_id=? AND cm.revoked_at IS NULL`,
+        selected.id
+      )
+    : [];
+
+  // One query for every user's scopes instead of one query per user (N+1).
+  const [users, scopeRows] = await Promise.all([
+    rows(`SELECT u.id,u.name,u.email,u.title,u.status,r.name role FROM users u JOIN roles r ON r.id=u.role_id ORDER BY u.name`),
+    rows(`SELECT user_id userId,scope_type scopeType FROM user_scopes`),
+  ]);
+  const scopesByUser = new Map<string, string[]>();
+  for (const s of scopeRows) {
+    const list = scopesByUser.get(s.userId) || [];
+    list.push(s.scopeType);
+    scopesByUser.set(s.userId, list);
   }
-  if(action==="shareCase"){
-    const resource=await caseResource(body.caseId,user.id);if(!resource||!canShareCase(user,resource))return json({error:"access_denied"},403);const target=await one(`SELECT id,name FROM users WHERE id=? AND status='Active'`,body.userId);if(!target||target.id===resource.owner_id)return json({error:"invalid_user"},400);const timestamp=now();await (env as any).DB.batch([(env as any).DB.prepare(`INSERT INTO case_members(id,case_id,user_id,access_level,created_by,created_at,updated_at,revoked_at) VALUES(?,?,?,?,?,?,?,NULL) ON CONFLICT(case_id,user_id) DO UPDATE SET access_level=excluded.access_level,updated_at=excluded.updated_at,revoked_at=NULL`).bind(id("member"),body.caseId,target.id,body.accessLevel,user.id,timestamp,timestamp),await audit(user.id,"case",body.caseId,"case shared","access",null,body.accessLevel,{caseId:body.caseId,userId:target.id,userName:target.name})]);return json({ok:true});
+  // PII redaction: only Admins receive emails, titles and scopes of everyone.
+  const isAdmin = user.role === "Admin";
+  const usersOut = users.map((u) =>
+    isAdmin
+      ? { ...u, scopes: scopesByUser.get(u.id) || [] }
+      : { id: u.id, name: u.name, email: null, title: null, role: u.role, status: u.status, scopes: [] as string[] }
+  );
+
+  // notes can contain sensitive HR information: only Owner/Collaborator may read it.
+  const canReadNotes = (c: Row) => ["Owner", "Collaborator"].includes(c.accessLevel);
+  const formatCase = (c: Row) => ({
+    id: c.id,
+    name: c.name,
+    initials: c.name.split(" ").map((x: string) => x[0]).join("").slice(0, 2),
+    caseType: c.caseType,
+    type: c.employmentType || "Employee",
+    team: c.team || "—",
+    teamId: c.teamId,
+    labId: c.labId,
+    date: c.startDate || c.endDate || "—",
+    owner: c.owner,
+    ownerId: c.ownerId,
+    status: c.status,
+    accessLevel: c.accessLevel,
+    role: c.role || "—",
+    location: c.location || "—",
+    notes: canReadNotes(c) ? c.notes : null,
+  });
+
+  return json({
+    currentUser: {
+      id: user.id,
+      name: user.name,
+      email: user.email,
+      title: user.title,
+      role: user.role,
+      status: user.status,
+      scopes: (user.scopes || []).map((s: Row) => s.scopeType),
+    },
+    tasks: taskRows.map((t) => ({
+      id: t.id,
+      title: t.title,
+      person: t.person,
+      caseId: t.case_id,
+      caseType: t.caseType,
+      due: t.due_date || "—",
+      priority: t.priority,
+      status: t.status,
+      email: t.task_type === "Email",
+      ownerId: t.owner_id,
+      ownerName: t.ownerName,
+    })),
+    cases: visible.map(formatCase),
+    sharedCases: visible.filter((c) => c.memberAccess).map(formatCase),
+    checklist: checklist.map((i) => ({
+      id: i.id,
+      caseId: i.case_id,
+      title: i.title,
+      section: i.section,
+      status: i.status,
+      ownerId: i.owner_id,
+      ownerName: i.ownerName || "Unassigned",
+      dueDate: i.due_date,
+      completedDate: i.completed_date,
+      completedByName: i.completedByName,
+      taskId: i.task_id,
+    })),
+    history: history.map((a) => ({
+      id: a.id,
+      createdAt: a.created_at,
+      actorName: a.actorName,
+      action: a.action,
+      field: a.field,
+      previousValue: a.previous_value,
+      newValue: a.new_value,
+    })),
+    members,
+    users: usersOut,
+    permissions: {
+      Admin: ["All cases", "Manage users", "Share", "Assign", "Edit"],
+      Operator: ["Owned/shared cases", "Complete tasks", "Assign permitted work"],
+      Manager: ["Scoped cases", "Assigned tasks"],
+      Viewer: ["Read permitted fields", "Assigned task completion"],
+    },
+  });
+}
+
+export async function POST(request: Request) {
+  const user = await currentUser(request);
+  if (!user) return json({ error: "access_denied" }, 403);
+  const body = (await request.json()) as Row;
+  const action = body.action;
+
+  if (action === "toggleWork") {
+    const task = body.taskId ? await one(`SELECT * FROM tasks WHERE id=?`, body.taskId) : null;
+    const item = body.checklistId
+      ? await one(`SELECT * FROM case_checklist_items WHERE id=?`, body.checklistId)
+      : task?.checklist_item_id
+        ? await one(`SELECT * FROM case_checklist_items WHERE id=?`, task.checklist_item_id)
+        : null;
+    const caseId = task?.case_id || item?.case_id;
+    if (!caseId) return json({ error: "not_found" }, 404);
+    const resource = await caseResource(caseId, user.id);
+    if (!resource) return json({ error: "not_found" }, 404);
+    const access = getCaseAccessLevel(user, resource);
+    const ownerId = task?.owner_id || item?.owner_id;
+    if (!canCompleteTask(user, ownerId, access)) return json({ error: "access_denied" }, 403);
+    const complete = body.complete !== false;
+    const timestamp = now();
+    const statements = [];
+    if (item)
+      statements.push(
+        (env as any).DB.prepare(`UPDATE case_checklist_items SET status=?,completed_date=?,completed_by=?,updated_at=? WHERE id=?`).bind(complete ? "Completed" : "Open", complete ? timestamp : null, complete ? user.id : null, timestamp, item.id)
+      );
+    if (task)
+      statements.push(
+        (env as any).DB.prepare(`UPDATE tasks SET status=?,completed_at=?,updated_at=? WHERE id=?`).bind(complete ? "Completed" : "Open", complete ? timestamp : null, timestamp, task.id)
+      );
+    else if (item?.task_id)
+      statements.push(
+        (env as any).DB.prepare(`UPDATE tasks SET status=?,completed_at=?,updated_at=? WHERE id=?`).bind(complete ? "Completed" : "Open", complete ? timestamp : null, timestamp, item.task_id)
+      );
+    statements.push(audit(user.id, "case_checklist_item", item?.id || task?.id || caseId, complete ? "checklist completed" : "checklist reopened", "status", complete ? "Open" : "Completed", complete ? "Completed" : "Open", caseId));
+    await (env as any).DB.batch(statements);
+    return json({ ok: true });
   }
-  if(action==="removeMember"){
-    const member=await one(`SELECT * FROM case_members WHERE id=? AND revoked_at IS NULL`,body.memberId);if(!member)return json({error:"not_found"},404);const resource=await caseResource(member.case_id,user.id);if(!resource||!canShareCase(user,resource))return json({error:"access_denied"},403);await (env as any).DB.batch([(env as any).DB.prepare(`UPDATE case_members SET revoked_at=?,updated_at=? WHERE id=?`).bind(now(),now(),member.id),await audit(user.id,"case",member.case_id,"case member removed","access",member.access_level,null,{caseId:member.case_id,userId:member.user_id})]);return json({ok:true});
+
+  if (action === "assignTask") {
+    const task = await one(`SELECT * FROM tasks WHERE id=?`, body.taskId);
+    if (!task) return json({ error: "not_found" }, 404);
+    const resource = await caseResource(task.case_id, user.id);
+    if (!resource || !canAssignTask(user, resource)) return json({ error: "access_denied" }, 403);
+    const assignee = await one(`SELECT id,name FROM users WHERE id=? AND status='Active'`, body.ownerId);
+    if (!assignee) return json({ error: "invalid_assignee" }, 400);
+    const old = await one(`SELECT name FROM users WHERE id=?`, task.owner_id);
+    const timestamp = now();
+    const statements = [(env as any).DB.prepare(`UPDATE tasks SET owner_id=?,updated_at=? WHERE id=?`).bind(assignee.id, timestamp, task.id)];
+    if (task.checklist_item_id)
+      statements.push((env as any).DB.prepare(`UPDATE case_checklist_items SET owner_id=?,updated_at=? WHERE id=?`).bind(assignee.id, timestamp, task.checklist_item_id));
+    statements.push(audit(user.id, "task", task.id, "task owner changed", "owner", old?.name, assignee.name, task.case_id));
+    await (env as any).DB.batch(statements);
+    return json({ ok: true });
   }
-  if(action==="saveUser"){
-    if(user.role!=="Admin")return json({error:"access_denied"},403);const timestamp=now();const role=await one(`SELECT id FROM roles WHERE name=?`,body.role);if(!role)return json({error:"invalid_role"},400);if(body.id){await (env as any).DB.prepare(`UPDATE users SET name=?,email=?,title=?,role_id=?,status=?,updated_at=? WHERE id=?`).bind(body.name,body.email.toLowerCase(),body.title||null,role.id,body.status,timestamp,body.id).run()}else{await (env as any).DB.prepare(`INSERT INTO users(id,email,name,title,role_id,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)`).bind(id("user"),body.email.toLowerCase(),body.name,body.title||null,role.id,body.status||"Active",timestamp,timestamp).run()}return json({ok:true});
+
+  if (action === "shareCase") {
+    if (!isShareAccessLevel(body.accessLevel)) return json({ error: "invalid_access_level" }, 400);
+    const resource = await caseResource(body.caseId, user.id);
+    if (!resource || !canShareCase(user, resource)) return json({ error: "access_denied" }, 403);
+    const target = await one(`SELECT id,name FROM users WHERE id=? AND status='Active'`, body.userId);
+    if (!target || target.id === resource.owner_id) return json({ error: "invalid_user" }, 400);
+    const timestamp = now();
+    await (env as any).DB.batch([
+      (env as any).DB.prepare(
+        `INSERT INTO case_members(id,case_id,user_id,access_level,created_by,created_at,updated_at,revoked_at) VALUES(?,?,?,?,?,?,?,NULL) ON CONFLICT(case_id,user_id) DO UPDATE SET access_level=excluded.access_level,updated_at=excluded.updated_at,revoked_at=NULL`
+      ).bind(id("member"), body.caseId, target.id, body.accessLevel, user.id, timestamp, timestamp),
+      audit(user.id, "case", body.caseId, "case shared", "access", null, body.accessLevel, body.caseId, { userId: target.id, userName: target.name }),
+    ]);
+    return json({ ok: true });
   }
-  return json({error:"unknown_action"},400);
+
+  if (action === "removeMember") {
+    const member = await one(`SELECT * FROM case_members WHERE id=? AND revoked_at IS NULL`, body.memberId);
+    if (!member) return json({ error: "not_found" }, 404);
+    const resource = await caseResource(member.case_id, user.id);
+    if (!resource || !canShareCase(user, resource)) return json({ error: "access_denied" }, 403);
+    await (env as any).DB.batch([
+      (env as any).DB.prepare(`UPDATE case_members SET revoked_at=?,updated_at=? WHERE id=?`).bind(now(), now(), member.id),
+      audit(user.id, "case", member.case_id, "case member removed", "access", member.access_level, null, member.case_id, { userId: member.user_id }),
+    ]);
+    return json({ ok: true });
+  }
+
+  if (action === "saveUser") {
+    if (user.role !== "Admin") return json({ error: "access_denied" }, 403);
+    const parsed = parseSaveUserInput(body);
+    if ("error" in parsed) return json({ error: parsed.error }, 400);
+    const role = await one(`SELECT id FROM roles WHERE name=?`, body.role);
+    if (!role) return json({ error: "invalid_role" }, 400);
+    const { input } = parsed;
+    const timestamp = now();
+    try {
+      if (body.id) {
+        const existing = await one(
+          `SELECT u.id,u.name,u.email,u.title,u.status,r.name role FROM users u JOIN roles r ON r.id=u.role_id WHERE u.id=?`,
+          body.id
+        );
+        if (!existing) return json({ error: "not_found" }, 404);
+        await (env as any).DB.batch([
+          (env as any).DB.prepare(`UPDATE users SET name=?,email=?,title=?,role_id=?,status=?,updated_at=? WHERE id=?`).bind(input.name, input.email, input.title, role.id, input.status, timestamp, body.id),
+          audit(
+            user.id,
+            "user",
+            body.id,
+            "user updated",
+            null,
+            JSON.stringify({ name: existing.name, email: existing.email, title: existing.title, role: existing.role, status: existing.status }),
+            JSON.stringify({ name: input.name, email: input.email, title: input.title, role: body.role, status: input.status })
+          ),
+        ]);
+      } else {
+        const newId = id("user");
+        await (env as any).DB.batch([
+          (env as any).DB.prepare(`INSERT INTO users(id,email,name,title,role_id,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)`).bind(newId, input.email, input.name, input.title, role.id, input.status, timestamp, timestamp),
+          audit(user.id, "user", newId, "user created", null, null, JSON.stringify({ name: input.name, email: input.email, title: input.title, role: body.role, status: input.status })),
+        ]);
+      }
+    } catch (error) {
+      if (isUniqueConstraintError(error)) return json({ error: "email_taken" }, 409);
+      throw error;
+    }
+    return json({ ok: true });
+  }
+
+  return json({ error: "unknown_action" }, 400);
 }

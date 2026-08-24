@@ -2,5 +2,5 @@ export type TaskRecord={id:string;title:string;person:string;caseId:string;caseT
 export type CaseRecord={id:string;name:string;initials:string;caseType:string;type:string;team:string;teamId:string|null;labId:string|null;date:string;owner:string;ownerId:string;status:string;accessLevel:string;role:string;location:string;notes:string|null};
 export type ChecklistRecord={id:string;caseId:string;title:string;section:string;status:string;ownerId:string|null;ownerName:string;dueDate:string|null;completedDate:string|null;completedByName:string|null;taskId:string|null};
 export type AuditRecord={id:string;createdAt:string;actorName:string;action:string;field:string|null;previousValue:string|null;newValue:string|null};
-export type InternalUser={id:string;name:string;email:string;title:string|null;role:string;status:string;scopes:string[]};
+export type InternalUser={id:string;name:string;email:string|null;title:string|null;role:string;status:string;scopes:string[]};
 export type WorkbenchData={currentUser:InternalUser;tasks:TaskRecord[];cases:CaseRecord[];sharedCases:CaseRecord[];checklist:ChecklistRecord[];history:AuditRecord[];members:Array<{id:string;userId:string;name:string;accessLevel:string}>;users:InternalUser[];permissions:Record<string,string[]>};

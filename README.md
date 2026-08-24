@@ -107,6 +107,19 @@ actions tied to the current ChatGPT user. Leave public content anonymous.
 
 ## Database migrations
 
-D1 migrations live in `drizzle/`. After pulling changes that add a migration
-(e.g. `0002_audit_case_id`), apply them with `wrangler d1 migrations apply <DB_NAME>`
-(remote) or `--local` for the dev database.
+D1 migrations live in `drizzle/`. The easiest way to apply them to the remote
+database is the one-command helper:
+
+```sh
+bash scripts/apply-d1-migrations.sh            # defaults to database site-creator-d1
+bash scripts/apply-d1-migrations.sh <DB_NAME>  # or pass a database name
+```
+
+The script prints the exact steps and required inputs up front, checks your
+environment, guides you through Cloudflare login (browser, or
+`CLOUDFLARE_API_TOKEN` for CI), applies pending migrations with
+`wrangler d1 migrations apply --remote`, and verifies the
+`audit_logs.case_id` column and `audit_case_idx` index afterwards.
+
+Manual alternative: `wrangler d1 migrations apply <DB_NAME>` (remote) or
+`--local` for the dev database.

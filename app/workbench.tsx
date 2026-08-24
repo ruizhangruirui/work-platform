@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import { localize } from "./localize";
 
 type View = "work" | "onboarding" | "offboarding" | "email" | "templates" | "settings" | "case";
 type Task = { id:number; title:string; person:string; caseType:string; due:string; priority:string; status:string; email?:boolean };
@@ -32,16 +33,17 @@ function Badge({children}:{children:React.ReactNode}){return <span className={`b
 
 export function Workbench(){
   const [view,setView]=useState<View>("work"); const [tasks,setTasks]=useState(seedTasks); const [profile,setProfile]=useState(false);
-  const [quick,setQuick]=useState(false); const [toast,setToast]=useState(""); const [selected,setSelected]=useState("Michael Smith");
+  const [quick,setQuick]=useState(false); const [toast,setToast]=useState(""); const [selected,setSelected]=useState("Michael Smith"); const [lang,setLang]=useState<"en"|"zh">("en");
   useEffect(()=>{const p=location.pathname.split("/")[1] as View; if(["work","onboarding","offboarding","email","templates","settings"].includes(p))setView(p||"work")},[]);
   useEffect(()=>{if(!toast)return;const t=setTimeout(()=>setToast(""),2600);return()=>clearTimeout(t)},[toast]);
+  useEffect(()=>{const root=document.querySelector<HTMLElement>("[data-lang-root]");if(!root)return;localize(root,lang==="zh");const observer=new MutationObserver(()=>localize(root,lang==="zh"));observer.observe(root,{childList:true,subtree:true});document.documentElement.lang=lang==="zh"?"zh-CN":"en";return()=>observer.disconnect()},[lang,view,profile,quick,toast]);
   const go=(v:View)=>{setView(v);history.pushState({},"",v==="work"?"/work":`/${v}`);setProfile(false)};
-  return <div className="shell">
+  return <div className="shell" data-lang-root>
     <aside className="sidebar"><div className="brand"><span className="brandmark">TW</span><span>TEAM<br/><b>WORKBENCH</b></span></div>
       <nav>{nav.map(g=><div className="navgroup" key={g.label}><div className="navlabel">{g.label}</div>{g.items.map(i=><button key={i[0]} className={view===i[0]?"active":""} onClick={()=>go(i[0] as View)}><span>{i[2]}</span>{i[1]}{i[0]==="email"&&<em>3</em>}</button>)}</div>)}</nav>
       <div className="sidebarfoot"><div className="support">?</div><div><b>Need help?</b><small>Open support center</small></div></div>
     </aside>
-    <main><header className="topbar"><div className="globalsearch"><Icon name="Search"/><input aria-label="Global search" placeholder="Search people, cases or tasks…"/><kbd>⌘ K</kbd></div><button className="circle"><Icon name="Bell"/><i/></button><div className="userwrap"><button className="user" onClick={()=>setProfile(!profile)}><span className="avatar">RZ</span><span><b>Rui Zhang</b><small>Administrator</small></span><span>⌄</span></button>{profile&&<div className="menu"><button>My Profile</button><button>My Signature</button><button>Outlook Settings</button><button>Preferences</button><hr/><button>Log out</button></div>}</div></header>
+    <main><header className="topbar"><div className="globalsearch"><Icon name="Search"/><input aria-label="Global search" placeholder="Search people, cases or tasks…"/><kbd>⌘ K</kbd></div><button className="langtoggle" onClick={()=>setLang(lang==="en"?"zh":"en")} aria-label="Switch language"><span className={lang==="en"?"on":""}>EN</span><i>/</i><span className={lang==="zh"?"on":""}>中文</span></button><button className="circle"><Icon name="Bell"/><i/></button><div className="userwrap"><button className="user" onClick={()=>setProfile(!profile)}><span className="avatar">RZ</span><span><b>Rui Zhang</b><small>Administrator</small></span><span>⌄</span></button>{profile&&<div className="menu"><button>My Profile</button><button>My Signature</button><button>Outlook Settings</button><button>Preferences</button><hr/><button>Log out</button></div>}</div></header>
       <div className="content">{view==="work"&&<Work tasks={tasks} go={go} quick={quick} setQuick={setQuick}/>} {view==="onboarding"&&<CaseList type="Onboarding" open={(n)=>{setSelected(n);setView("case")}}/>} {view==="offboarding"&&<CaseList type="Offboarding" open={(n)=>{setSelected(n);setView("case")}}/>} {view==="case"&&<CaseDetail person={selected} go={go} tasks={tasks} setTasks={setTasks} toast={setToast}/>} {view==="email"&&<EmailCenter tasks={tasks} setTasks={setTasks} toast={setToast}/>} {view==="templates"&&<Templates toast={setToast}/>} {view==="settings"&&<Settings/>}</div>
     </main>{toast&&<div className="toast"><Icon name="Check"/>{toast}</div>}
   </div>

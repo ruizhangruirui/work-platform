@@ -1,0 +1,5 @@
+.langtoggle{margin-left:auto;margin-right:8px;height:32px;border:1px solid #dfe3e8;background:#f8f9fb;border-radius:17px;padding:0 11px;display:flex;align-items:center;gap:5px;color:#929aa7;font-size:11px;font-weight:650}
+.langtoggle .on{color:#4050b0;font-weight:800}
+.langtoggle i{font-style:normal;color:#c8cdd5}
+.langtoggle+.circle{margin-left:0}
+html[lang="zh-CN"] body{font-family:var(--font-geist),"PingFang SC","Microsoft YaHei",sans-serif}
